@@ -53,6 +53,9 @@ final class SiriAudioNormalizer: @unchecked Sendable {
         }
     }
 
+    private let allowFormatChanges: Bool
+    private var sourceSignature: FormatSignature?
+    init(allowFormatChanges: Bool = false) { self.allowFormatChanges = allowFormatChanges }
     private let lock = NSLock()
     private var mode: Mode?
     private var nextFrame = 0
@@ -76,11 +79,20 @@ final class SiriAudioNormalizer: @unchecked Sendable {
                 throw CLIError("Siri daemon returned an invalid audio format", code: .noAudio)
             }
 
+            let signature = FormatSignature(source.format)
+            var prefix: [NormalizedPCMChunk] = []
+            if allowFormatChanges, let previous = sourceSignature, previous != signature {
+                guard pendingPCM.isEmpty else { throw CLIError("Format changed with an incomplete PCM frame", code: .noAudio) }
+                if case .converted(_, let converter, _) = mode { prefix = try drain(converter) }
+                mode = nil
+                pendingPCMSignature = nil
+            }
+            sourceSignature = signature
             switch source.format.mFormatID {
             case kAudioFormatLinearPCM:
-                return try appendPCM(source)
+                return prefix + (try appendPCM(source))
             case kAudioFormatOpus:
-                return try appendOpus(source)
+                return prefix + (try appendOpus(source))
             default:
                 throw CLIError(
                     "Unsupported Siri daemon audio codec \(fourCC(source.format.mFormatID))",

@@ -77,7 +77,7 @@ public enum Doctor {
         let voiceReports = siriVoices.map {
             VoiceDoctorReport(
                 voice: $0,
-                aneModelCompiled: coordinator.siri.isANECompiled(voiceName: $0.name)
+                aneModelCompiled: coordinator.siri.isANECompiled(voiceName: $0.assetKey)
             )
         }
 

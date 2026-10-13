@@ -12,51 +12,80 @@ final class LiveSystemTests: XCTestCase {
     func testInstalledSiriVoiceProducesAcceptedAudioAndTimings() throws {
         try requireLiveTests()
         let engine = SiriEngine()
-        guard let voice = try engine.voices().first else {
-            return XCTFail("No installed Siri voice")
+        guard let voice = try engine.voices().first(where: { $0.language == "en-US" && $0.assetKey.contains(":natural:") }) else {
+            return XCTFail("Install a legacy en-US Siri voice for the English timing test")
         }
         var options = SynthesisOptions()
-        options.text = "Live system timing test \(UUID().uuidString.prefix(8))."
-        options.voice = voice.name
+        options.text = "The quiet river flows beside the old stone bridge."
+        options.voice = voice.assetKey
+        options.controls.generation = .legacy
         options.requestTimings = true
         let rendered = try engine.synthesize(options)
         let accepted = try AudioIO.validatePCM(rendered.pcm, spec: rendered.spec, text: options.text)
         XCTAssertGreaterThan(accepted.durationSeconds, 0.1)
         XCTAssertTrue(accepted.nonSilent)
         XCTAssertEqual(rendered.engine, .siri)
-        if !rendered.timings.isEmpty {
-            let mapped = try WordTimingMapper.map(
-                rendered.timings,
-                in: options.text,
-                duration: accepted.durationSeconds
-            )
-            XCTAssertFalse(mapped.isEmpty)
-            XCTAssertTrue(mapped.allSatisfy { $0.start <= $0.end })
-        }
+        XCTAssertTrue(rendered.timingsSupported)
+        XCTAssertFalse(rendered.timings.isEmpty, "Legacy synthesis must return requested word timings: \(voice.assetKey), \(String(describing: rendered.diagnostics))")
+        let mapped = try WordTimingMapper.map(
+            rendered.timings,
+            in: options.text,
+            duration: accepted.durationSeconds
+        )
+        XCTAssertTrue(mapped.allSatisfy { $0.start <= $0.end })
     }
 
     func testUnicodeTimingRangesRemainInBounds() throws {
         try requireLiveTests()
         let engine = SiriEngine()
-        guard let voice = try engine.voices().first(where: { $0.language == "en-US" }) else {
-            throw XCTSkip("No installed en-US Siri voice")
+        guard let voice = try engine.voices().first(where: { $0.language == "en-US" && $0.assetKey.contains(":natural:") }) else {
+            throw XCTSkip("No installed legacy en-US Siri voice")
         }
         var options = SynthesisOptions()
-        options.text = "Emoji 👋🏽, café, and 世界 \(UUID().uuidString.prefix(4))."
-        options.voice = voice.name
+        // Use text the selected English frontend can pronounce. Synthetic
+        // emoji/CJK ranges are covered independently in WordTimingTests.
+        options.text = "Welcome to the café. A naïve visitor reads a résumé."
+        options.voice = voice.assetKey
+        options.controls.generation = .legacy
         options.requestTimings = true
         let rendered = try engine.synthesize(options)
         let accepted = try AudioIO.validatePCM(rendered.pcm, spec: rendered.spec, text: options.text)
-        if !rendered.timings.isEmpty {
-            let mapped = try WordTimingMapper.map(
-                rendered.timings,
-                in: options.text,
-                duration: accepted.durationSeconds
-            )
-            XCTAssertTrue(mapped.allSatisfy {
-                $0.utf16Location + $0.utf16Length <= options.text.utf16.count
-            })
+        XCTAssertTrue(rendered.timingsSupported)
+        XCTAssertFalse(rendered.timings.isEmpty, "Legacy Unicode synthesis must return requested word timings")
+        let mapped = try WordTimingMapper.map(
+            rendered.timings,
+            in: options.text,
+            duration: accepted.durationSeconds
+        )
+        XCTAssertTrue(mapped.allSatisfy {
+            $0.utf16Location + $0.utf16Length <= options.text.utf16.count
+        })
+    }
+
+    func testLegacyParagraphTimingsMatchOriginalWordsAcrossChunks() throws {
+        try requireLiveTests()
+        guard let voice = try SiriEngine().voices().first(where: { $0.language == "en-US" && $0.assetKey.contains(":natural:") }) else {
+            return XCTFail("Install a legacy en-US Siri voice for the English timing test")
         }
+        var options = SynthesisOptions()
+        options.text = "  The quiet river flows beside the old stone bridge.\n\nMara   opens the library before the morning train arrives.\r\n\r\nOliver\tbrings a wooden cabinet with narrow drawers and bright handles.\n\nTogether they place the maps on the table for everyone to see.  "
+        options.voice = voice.assetKey
+        options.controls.generation = .legacy
+        options.requestTimings = true
+        options.chunkBytes = 100
+        let result = try LongFormSynthesis.render(options, coordinator: EngineCoordinator(), sink: { _ in })
+        XCTAssertGreaterThan(result.diagnostics.count, 1)
+        XCTAssertTrue(result.timingsSupported)
+        let mapped = try WordTimingMapper.map(result.timings, in: options.text, duration: result.durationSeconds)
+        let expected = options.text.split(whereSeparator: \.isWhitespace).map {
+            String($0).trimmingCharacters(in: .punctuationCharacters)
+        }
+        // The native frontend sometimes groups adjacent words into one range.
+        let actual = mapped.flatMap { $0.text.split(whereSeparator: \.isWhitespace) }.map {
+            String($0).trimmingCharacters(in: .punctuationCharacters)
+        }
+        XCTAssertEqual(actual, expected)
+        XCTAssertTrue(result.diagnostics.allSatisfy { $0.verified && $0.resolvedVoice == voice.assetKey })
     }
 
     func testPublicAVFallbackEngineProducesAcceptedAudio() throws {
@@ -160,7 +189,7 @@ final class LiveSystemTests: XCTestCase {
     func testOpenAIEndpointProducesReadableWAV() throws {
         try requireLiveTests()
         let coordinator = EngineCoordinator()
-        guard let voice = try coordinator.siri.voices().first else {
+        guard let voice = try coordinator.siri.voices().first(where: { !$0.assetKey.contains(":fmvoice:") }) else {
             return XCTFail("No installed Siri voice")
         }
         var serverOptions = ServeOptions()
@@ -255,10 +284,10 @@ final class LiveSystemTests: XCTestCase {
         }
     }
 
-    func testEveryInstalledSiriVoiceProducesCanonicalStreamEvents() throws {
+    func testEveryInstalledLegacySiriVoiceProducesCanonicalStreamEvents() throws {
         try requireLiveTests()
         let engine = SiriEngine(keepActive: true)
-        let voices = try engine.refreshInstalledVoices()
+        let voices = try engine.refreshInstalledVoices().filter { !$0.assetKey.contains(":fmvoice:") }
         XCTAssertFalse(voices.isEmpty)
 
         for voice in voices {
@@ -303,7 +332,7 @@ final class LiveSystemTests: XCTestCase {
     func testActiveCancellationDoesNotLeakIntoNextRender() throws {
         try requireLiveTests()
         let engine = SiriEngine(keepActive: true)
-        guard let voice = try engine.voices().first else {
+        guard let voice = try engine.voices().first(where: { !$0.assetKey.contains(":fmvoice:") }) else {
             return XCTFail("No installed Siri voice")
         }
         var longOptions = SynthesisOptions()

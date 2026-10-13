@@ -3,7 +3,7 @@ import CoreAudioTypes
 import Foundation
 
 public enum AudioIO {
-    public static func validatePCM(_ pcm: Data, spec: AudioSpec, text: String) throws -> AudioResult {
+    public static func validatePCM(_ pcm: Data, spec: AudioSpec, text: String, allowSilence: Bool = false) throws -> AudioResult {
         guard spec.sampleRate > 0, spec.channels > 0, spec.bitsPerChannel == 16,
               spec.bytesPerFrame == spec.channels * 2,
               !pcm.isEmpty, pcm.count.isMultiple(of: spec.bytesPerFrame) else {
@@ -17,7 +17,7 @@ public enum AudioIO {
                 break
             }
         }
-        guard nonSilent else {
+        guard nonSilent || allowSilence else {
             throw CLIError("Synthesis produced only silence", code: .noAudio)
         }
 
@@ -50,6 +50,17 @@ public enum AudioIO {
             durationSeconds: duration,
             nonSilent: nonSilent
         )
+    }
+
+    static func applyingVolume(_ gain: Float, to pcm: Data) -> Data {
+        if gain == 1 { return pcm }
+        if gain == 0 { return Data(repeating: 0, count: pcm.count) }
+        var result = pcm
+        result.withUnsafeMutableBytes { bytes in
+            let samples = bytes.bindMemory(to: Int16.self)
+            for index in samples.indices { samples[index] = Int16((Float(samples[index]) * gain).rounded()) }
+        }
+        return result
     }
 
     public static func makeWAV(pcm: Data, spec: AudioSpec) throws -> Data {

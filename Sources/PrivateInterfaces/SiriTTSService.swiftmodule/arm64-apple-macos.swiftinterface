@@ -29,6 +29,7 @@ public class AudioData : Foundation.NSObject {
 }
 
 public class SynthesisContext : Foundation.NSObject {
+  public var voiceAcousticsOverride: SiriTTSService.AcousticValues? { get set }
   public var didGenerateAudio: ((SiriTTSService.AudioData) -> Swift.Void)? { get set }
   public var didGenerateWordTimings: (([SiriTTSService.WordTimingInfo]) -> Swift.Void)? { get set }
   public var rate: Swift.Float { get set }
@@ -44,6 +45,7 @@ public class SynthesisRequest : SiriTTSService.BaseRequest {
 }
 
 public class DaemonSession : Foundation.NSObject {
+  public var _clientId: Swift.String? { get set }
   override public init()
   public var keepActive: Swift.Bool { get set }
   public func invokeDaemon() -> Swift.Bool
@@ -64,6 +66,25 @@ public class DaemonSession : Foundation.NSObject {
     request: SiriTTSService.SynthesisRequest,
     didFinish: @escaping (Swift.Error?) -> Swift.Void
   )
+  public struct SynthesisInputStream {
+    public enum Token {
+      case text(Swift.String)
+      case utterance(Swift.String)
+      case endOfStream
+    }
+    public func append(_ token: SiriTTSService.DaemonSession.SynthesisInputStream.Token, reply: @escaping (Swift.Error?) -> Swift.Void)
+  }
+  public func stream(synthesisRequest: SiriTTSService.SynthesisRequest, inputHandler: @escaping (SiriTTSService.DaemonSession.SynthesisInputStream) -> Swift.Void, didFinish: @escaping (Swift.Error?) -> Swift.Void)
+  public func subscribedVoices(clientId: Swift.String?, reply: @escaping ([SiriTTSService.SynthesisVoiceSubscription]) -> Swift.Void)
+  public func get(transcriptContext: @escaping (SiriTTSService.TranscriptContext?) -> Swift.Void)
+  public func set(transcriptContext: SiriTTSService.TranscriptContext?)
+  public func speak(speechRequest: SiriTTSService.SpeechRequest, didFinish: @escaping (Swift.Error?) -> Swift.Void)
+  public func pause(request: SiriTTSService.BaseRequest)
+  public func resume(request: SiriTTSService.BaseRequest)
+  public func adjustRate(_ value: Swift.Float, didFinish: @escaping (Swift.Error?) -> Swift.Void)
+  public func adjustVolume(_ value: Swift.Float, rampTime: Swift.Double, didFinish: @escaping (Swift.Error?) -> Swift.Void)
+  public func textToPhoneme(request: SiriTTSService.PhonemeRequest, didFinish: @escaping (Swift.String?, Swift.Error?) -> Swift.Void)
+  public func estimateDuration(request: SiriTTSService.SynthesisRequest, didFinish: @escaping (Swift.Double, Swift.Error?) -> Swift.Void)
   public func cancel(request: SiriTTSService.BaseRequest)
   public func queryWordTimingSupport(
     voice: SiriTTSService.SynthesisVoice,
@@ -73,4 +94,48 @@ public class DaemonSession : Foundation.NSObject {
     matching: SiriTTSService.SynthesisVoice,
     reply: @escaping (Swift.Bool, Swift.Error?) -> Swift.Void
   )
+}
+
+public struct AcousticValues {
+  public init(ppm: Swift.Double?, wsola: Swift.Double?, f0Mean: Swift.Double?, f0Var: Swift.Double?, intensityMean: Swift.Double?, intensityVar: Swift.Double?)
+}
+
+public class PhonemeRequest : SiriTTSService.BaseRequest {
+  @objc public enum PhonemeSystem : Swift.Int, Swift.CustomStringConvertible {
+    case placeholder = 0
+    public typealias RawValue = Swift.Int
+    public init?(rawValue: Swift.Int)
+    public var rawValue: Swift.Int { get }
+    public var description: Swift.String { get }
+  }
+  public init(text: Swift.String, voice: SiriTTSService.SynthesisVoice, phonemeSystem: SiriTTSService.PhonemeRequest.PhonemeSystem)
+}
+
+public class SynthesisVoiceSubscription : Foundation.NSObject {
+  public var voice: SiriTTSService.SynthesisVoice { get }
+  public var clientId: Swift.String { get }
+  public var accessoryId: Swift.String? { get }
+}
+public struct TranscriptContext {
+  public enum Turn { case user(Swift.String); case assistant(Swift.String) }
+  public init(transcriptId: Swift.String, dialogs: [SiriTTSService.TranscriptContext.Turn])
+  public var transcriptId: Swift.String { get }
+  public var dialogs: [SiriTTSService.TranscriptContext.Turn] { get }
+}
+@objc public enum SiriDataProcessingStyle : Swift.Int {
+  case placeholder = 0
+  public typealias RawValue = Swift.Int
+  public init?(rawValue: Swift.Int)
+  public var rawValue: Swift.Int { get }
+}
+
+public class SpeechRequest : SiriTTSService.BaseRequest {
+  public init(text: Swift.String, voice: SiriTTSService.SynthesisVoice)
+  public var synthesisContext: SiriTTSService.SynthesisContext { get set }
+  public var audibleContext: SiriTTSService.AudibleContext { get set }
+}
+public class AudibleContext : Foundation.NSObject {
+  public var playbackRate: Swift.Float { get set }
+  public var playbackVolume: Swift.Float { get set }
+  public var didStartSpeaking: (() -> Swift.Void)? { get set }
 }

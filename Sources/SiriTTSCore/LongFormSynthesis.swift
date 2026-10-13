@@ -1,4 +1,5 @@
 import Foundation
+import SiriTTSProtocol
 
 struct TextChunk: Equatable, Sendable {
     let text: String
@@ -25,6 +26,8 @@ enum TextChunker {
             var cursor = start
             var bytes = 0
             var preferredBoundary: String.Index?
+            var sentenceBoundary: String.Index?
+            var sentenceEnded = false
 
             while cursor < text.endIndex {
                 let next = text.index(after: cursor)
@@ -33,6 +36,15 @@ enum TextChunker {
                 if bytes > 0, bytes + characterBytes > byteLimit { break }
                 bytes += characterBytes
                 cursor = next
+                if character.last?.isWhitespace == true {
+                    if sentenceEnded || character.last?.isNewline == true {
+                        sentenceBoundary = cursor
+                    }
+                } else if let last = character.last, ".!?".contains(last) {
+                    sentenceEnded = true
+                } else if let last = character.last, !"\"'”’)]}".contains(last) {
+                    sentenceEnded = false
+                }
                 if character.last?.isWhitespace == true ||
                     character.last.map({ ".!?;:".contains($0) }) == true {
                     preferredBoundary = cursor
@@ -43,6 +55,8 @@ enum TextChunker {
             let boundary: String.Index
             if cursor == text.endIndex {
                 boundary = cursor
+            } else if let sentenceBoundary, sentenceBoundary > start {
+                boundary = sentenceBoundary
             } else if let preferredBoundary, preferredBoundary > start {
                 boundary = preferredBoundary
             } else {
@@ -68,28 +82,42 @@ struct IncrementalSynthesisResult: Sendable {
     let elapsed: TimeInterval
     let timeToFirstAudio: TimeInterval?
     let bytes: Int
+    let nonSilent: Bool
     let sampleCount: Int
     let durationSeconds: TimeInterval
+    let diagnostics: [SynthesisDiagnostics]
 }
 
 enum LongFormSynthesis {
+    // Longer FM requests omitted complete sentences in the chapter acceptance
+    // run. Keep plain-text requests short even when callers set a larger target.
+    static let expressiveChunkByteLimit = 400
     /// Renders bounded pieces sequentially and releases each piece after the sink
     /// accepts it. Memory use therefore follows chunk size instead of audio length.
     static func render(
         _ options: SynthesisOptions,
         coordinator: EngineCoordinator,
-        chunkByteLimit: Int = TextChunker.defaultByteLimit,
+        chunkByteLimit: Int? = nil,
         onProvisionalPCMChunk: (@Sendable (Data) -> Void)? = nil,
         sink: (Data) throws -> Void
     ) throws -> IncrementalSynthesisResult {
         let started = Date()
-        let chunks = TextChunker.chunks(options.text, byteLimit: chunkByteLimit)
+        if options.ssml { try SSML.validate(options.text) }
+        var byteLimit = chunkByteLimit ?? options.chunkBytes
+        if !options.ssml, options.engine != .av, byteLimit > expressiveChunkByteLimit {
+            let expressive = options.controls.requiresExpressiveVoice ||
+                (try? VoiceResolver.select(options, from: coordinator.siri.voices(timeout: min(10, options.timeout))))?.assetKey.contains(":fmvoice:") == true
+            if expressive { byteLimit = expressiveChunkByteLimit }
+        }
+        let chunks = options.ssml ? [TextChunk(text: options.text, utf16Location: 0)] : TextChunker.chunks(options.text, byteLimit: byteLimit)
         var selectedEngine: EngineKind?
         var selectedVoice: VoiceInfo?
         var selectedSpec: AudioSpec?
         var fallbackFrom: EngineKind?
+        var diagnostics: [SynthesisDiagnostics] = []
         var timings: [RawWordTiming] = []
         var timingsSupported = true
+        var nonSilent = false
         var byteCount = 0
         var sampleCount = 0
         var duration = 0.0
@@ -102,6 +130,9 @@ enum LongFormSynthesis {
             chunkOptions.text = chunk.text
             chunkOptions.inputFile = nil
             chunkOptions.output = nil
+            let remaining = options.timeout - Date().timeIntervalSince(started)
+            guard remaining > 0 else { throw CLIError("Long-form request timed out", code: .operationTimedOut) }
+            chunkOptions.timeout = remaining
             if options.engine == .auto, let selectedEngine {
                 chunkOptions.engine = selectedEngine
             }
@@ -110,10 +141,12 @@ enum LongFormSynthesis {
                 chunkOptions,
                 onPCMChunk: onProvisionalPCMChunk
             )
+            if let diagnostic = rendered.audio.diagnostics { diagnostics.append(diagnostic) }
             let acceptance = try AudioIO.validatePCM(
                 rendered.audio.pcm,
                 spec: rendered.audio.spec,
-                text: chunk.text
+                text: chunk.text,
+                allowSilence: options.volume == 0
             )
 
             if let selectedSpec, selectedSpec != rendered.audio.spec {
@@ -151,6 +184,7 @@ enum LongFormSynthesis {
             if onProvisionalPCMChunk == nil {
                 try sink(rendered.audio.pcm)
             }
+            nonSilent = nonSilent || acceptance.nonSilent
             byteCount += acceptance.bytes
             sampleCount += acceptance.sampleCount
             duration += acceptance.durationSeconds
@@ -172,8 +206,10 @@ enum LongFormSynthesis {
             elapsed: Date().timeIntervalSince(started),
             timeToFirstAudio: timeToFirstAudio,
             bytes: byteCount,
+            nonSilent: nonSilent,
             sampleCount: sampleCount,
-            durationSeconds: duration
+            durationSeconds: duration,
+            diagnostics: diagnostics
         )
     }
 }

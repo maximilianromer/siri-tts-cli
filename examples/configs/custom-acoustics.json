@@ -1,0 +1,16 @@
+{
+  "voice": "aaron",
+  "controls": {
+    "generation": "expressive",
+    "pace": 3,
+    "expressivity": 3,
+    "acoustics": {
+      "ppm": 820,
+      "wsola": 1,
+      "f0Mean": 5,
+      "f0Variation": 12,
+      "intensityMean": 9,
+      "intensityVariation": 10
+    }
+  }
+}

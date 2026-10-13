@@ -29,6 +29,9 @@ private func macOSSDKPath() -> String {
 let privateFrameworks = macOSSDKPath() + "/System/Library/PrivateFrameworks"
 let privateInterfaces = "Sources/PrivateInterfaces"
 let xcodePrivateInterfaces = "${SRCROOT}/Sources/PrivateInterfaces"
+let cliInfoPlist = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .appendingPathComponent("Sources/siri-tts/Info.plist").path
 
 let package = Package(
     name: "siri-tts-cli",
@@ -36,13 +39,18 @@ let package = Package(
     products: [
         .executable(name: "siri-tts", targets: ["siri-tts"]),
         .library(name: "SiriTTSClient", targets: ["SiriTTSClient"]),
+        .library(name: "SiriTTSCore", targets: ["SiriTTSCore"]),
     ],
     targets: [
-        .target(name: "SiriTTSClient"),
+        .target(name: "SiriTTSProtocol"),
+        .target(name: "SiriTTSClient", dependencies: ["SiriTTSProtocol"]),
         .target(
             name: "SiriTTSCore",
+            dependencies: ["SiriTTSProtocol"],
             swiftSettings: [
                 .unsafeFlags([
+                    // Keeps private implementation imports out of executable clients.
+                    // SiriTTSProtocol remains a source-only package without unsafe flags.
                     "-enable-library-evolution",
                     "-I\(privateInterfaces)",
                     "-I\(xcodePrivateInterfaces)",
@@ -61,7 +69,16 @@ let package = Package(
         ),
         .executableTarget(
             name: "siri-tts",
-            dependencies: ["SiriTTSCore"]
+            dependencies: ["SiriTTSCore"],
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                // macOS 27 voice subscriptions require Bundle.main to identify
+                // the caller, even for a standalone command-line executable.
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist", "-Xlinker", cliInfoPlist,
+                ]),
+            ]
         ),
         .testTarget(
             name: "SiriTTSCoreTests",

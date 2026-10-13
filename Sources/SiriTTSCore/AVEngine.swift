@@ -81,7 +81,7 @@ public final class AVEngine: @unchecked Sendable {
             throw CLIError("Synthesis cancelled", code: .cancelled)
         }
         let pcm = accumulator.snapshot().data
-        _ = try AudioIO.validatePCM(pcm, spec: .siriPCM, text: options.text)
+        let acceptance = try AudioIO.validatePCM(pcm, spec: .siriPCM, text: options.text, allowSilence: options.volume == 0)
         let voiceInfo = VoiceInfo(
             name: voice.name,
             language: voice.language,
@@ -99,7 +99,8 @@ public final class AVEngine: @unchecked Sendable {
             elapsed: Date().timeIntervalSince(started),
             timeToFirstAudio: accumulator.snapshot().firstAudioAt.map {
                 $0.timeIntervalSince(started)
-            }
+            },
+            nonSilent: acceptance.nonSilent
         )
     }
 

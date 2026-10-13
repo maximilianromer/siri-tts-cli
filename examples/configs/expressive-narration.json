@@ -1,0 +1,18 @@
+{
+  "voice": "aaron",
+  "language": "en-US",
+  "engine": "siri",
+  "format": "wav",
+  "rate": 1,
+  "pitch": 1,
+  "volume": 1,
+  "prewarm": true,
+  "timeout": 120,
+  "chunkBytes": 400,
+  "controls": {
+    "generation": "expressive",
+    "pace": 3,
+    "expressivity": 3,
+    "allowVoiceFallback": false
+  }
+}

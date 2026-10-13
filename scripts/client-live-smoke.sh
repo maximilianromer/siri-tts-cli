@@ -47,7 +47,9 @@ wait_for_server() {
   fi
 }
 
-"$binary" serve --host 127.0.0.1 --port "$port" \
+# This transport check deliberately sends more than the default 1 MiB input
+# limit. Configure a 2 MiB input allowance while retaining the body limit.
+"$binary" serve --host 127.0.0.1 --port "$port" --max-input-bytes 2097152 \
   >"$scratch/server.stdout" 2>"$scratch/server.stderr" &
 server_pid=$!
 wait_for_server "$helper_url" "Swift client smoke test"

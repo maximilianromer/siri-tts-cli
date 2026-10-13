@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SiriTTSProtocol
 
 public struct HTTPRequest: Equatable, Sendable {
     public let method: String
@@ -38,6 +39,7 @@ public enum HTTPParser {
             }
             headers[name] = value
         }
+        guard headers["transfer-encoding"] == nil else { throw CLIError("Transfer-Encoding is not supported; send Content-Length", code: .usage) }
         let bodyStart = headerRange.upperBound
         let body = Data(data[bodyStart...])
         if let rawLength = headers["content-length"] {
@@ -63,13 +65,18 @@ public struct SpeechAPIRequest: Codable, Equatable, Sendable {
     public let voice: String
     public let responseFormat: String?
     public let speed: Double?
+    public var controls: SpeechControls? = nil
+    public var pitch: Float? = nil
+    public var volume: Float? = nil
+    public var phonemeSystem: PhonemeAlphabet? = nil
+    public var ssml: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case model
         case input
         case voice
         case responseFormat = "response_format"
-        case speed
+        case speed, controls, pitch, volume, phonemeSystem, ssml
     }
 }
 
@@ -84,6 +91,21 @@ private struct FileSpeechResponse {
     let url: URL
     let contentType: String
     let engine: EngineKind
+    let diagnostics: [SynthesisDiagnostics]
+    var headers: [String: String] {
+        var result = ["X-Siri-TTS-Engine": engine.rawValue]
+        if let last = diagnostics.last {
+            result["X-Siri-TTS-Voice"] = last.resolvedVoice ?? last.requestedVoice
+            result["X-Siri-TTS-Voice-Verified"] = last.verified ? "true" : "false"
+            result["X-Siri-TTS-Voice-Substituted"] = diagnostics.contains { $0.voiceSubstituted } ? "true" : "false"
+            result["X-Siri-TTS-Pace"] = last.pace
+            result["X-Siri-TTS-Expressivity"] = last.expressivity
+            result["X-Siri-TTS-Acoustics"] = last.acoustics
+            result["X-Siri-TTS-Client-ID"] = last.clientID
+            result["X-Siri-TTS-Unverified-Controls"] = Array(Set(diagnostics.flatMap { $0.unverifiedControls ?? [] })).sorted().joined(separator: ",")
+        }
+        return result
+    }
 }
 
 public final class SpeechServer {
@@ -102,7 +124,7 @@ public final class SpeechServer {
         if options.engine != .av {
             coordinator.siri.enableKeepActive()
         }
-        if !["127.0.0.1", "::1", "localhost"].contains(options.host) {
+        if options.authToken == nil && !["127.0.0.1", "::1", "localhost"].contains(options.host) {
             writeStderr(
                 "warning: binding \(options.host) exposes unauthenticated speech synthesis to the network\n"
             )
@@ -151,6 +173,7 @@ public final class SpeechServer {
                 do {
                     configureClientSocket(client)
                     let request = try readRequest(from: client)
+                    try authorize(request)
                     if request.method == "POST", request.path == "/v1/audio/speech" {
                         try writeSpeechResponse(request, to: client)
                     } else {
@@ -262,7 +285,72 @@ public final class SpeechServer {
         return descriptor
     }
 
+    private func authorize(_ request: HTTPRequest) throws {
+        guard let expected = options.authToken else { return }
+        let supplied = Array((request.headers["authorization"] ?? "").utf8)
+        let required = Array(("Bearer " + expected).utf8)
+        var difference = supplied.count ^ required.count
+        for i in required.indices { difference |= Int(required[i] ^ (i < supplied.count ? supplied[i] : 0)) }
+        guard difference == 0 else { throw HTTPFailure(status: "401 Unauthorized", message: "A valid bearer token is required") }
+    }
+
     public func route(_ request: HTTPRequest) throws -> Data {
+        do { try authorize(request) } catch { return errorResponse(error) }
+        if request.body.count > options.maximumBodyBytes { return errorResponse(HTTPFailure(status: "413 Payload Too Large", message: "Request body exceeds the configured limit")) }
+        if request.method == "GET", request.path == "/health" {
+            return response(status: "200 OK", contentType: "application/json", body: encodedJSON(["status": "listening", "version": siriTTSVersion]))
+        }
+        if request.method == "POST", ["/v1/audio/phonemes", "/v1/audio/estimate"].contains(request.path) {
+            do {
+                let api = try parseSpeechRequest(request)
+                var synthesis = SynthesisOptions()
+                synthesis.text = api.input; synthesis.voice = api.voice; synthesis.controls = api.controls ?? SpeechControls()
+                synthesis.rate = Float(api.speed ?? 1); synthesis.pitch = api.pitch ?? 1; synthesis.volume = api.volume ?? 1
+                synthesis.ssml = api.ssml ?? false
+                synthesis.timeout = options.requestTimeout; synthesis.engine = options.engine
+                let result = try coordinator.siri.analyze(synthesis, phonemeSystem: request.path.hasSuffix("phonemes") ? (api.phonemeSystem ?? .xsampa) : nil)
+                return response(status: "200 OK", contentType: "application/json", body: encodedJSON(result))
+            } catch { return errorResponse(error) }
+        }
+        if request.method == "POST", request.path == "/v1/voices/actions" {
+            do {
+                let action = try JSONDecoder().decode(VoiceActionRequest.self, from: request.body)
+                if [.install, .purge].contains(action.action), !options.allowVoiceManagement { throw HTTPFailure(status: "403 Forbidden", message: "This helper has not enabled voice management") }
+                let timeout = action.timeout ?? 30
+                guard !action.voice.isEmpty, timeout.isFinite, (1...300).contains(timeout) else { throw CLIError("voice and timeout (1 through 300 seconds) are required", code: .usage) }
+                let result: VoiceActionResult
+                switch action.action {
+                case .status:
+                    let value = try coordinator.siri.installationStatus(for: action.voice, timeout: timeout)
+                    result = VoiceActionResult(action: .status, voice: action.voice, assetKey: value.assetKey, status: value.state.rawValue, detail: "Installed inventory does not prove expressive synthesis readiness")
+                case .install:
+                    let value = try coordinator.siri.installVoice(named: action.voice, timeout: timeout)
+                    result = VoiceActionResult(action: .install, voice: action.voice, assetKey: value.assetKey, status: "requested", detail: "Subscription acknowledged; download completion is not confirmed")
+                case .wait:
+                    let value = try coordinator.siri.waitForVoiceInstallation(assetKey: action.voice, identifier: action.voice, timeout: timeout)
+                    result = VoiceActionResult(action: .wait, voice: action.voice, assetKey: value.assetKey, status: value.state.rawValue)
+                case .purge:
+                    let value = try coordinator.siri.purgeVoice(identifier: action.voice, timeout: timeout)
+                    result = VoiceActionResult(action: .purge, voice: action.voice, assetKey: value.assetKey, status: value.status.rawValue, detail: "Subscriptions remain; macOS may download the asset again")
+                }
+                return response(status: "200 OK", contentType: "application/json", body: encodedJSON(result))
+            } catch { return errorResponse(error) }
+        }
+        if request.method == "GET", request.path == "/v1/subscriptions" {
+            return response(status: "200 OK", contentType: "application/json", body: encodedJSON(try coordinator.siri.subscriptions()))
+        }
+        if request.method == "POST", request.path == "/v1/voices/presets" {
+            do {
+                struct Query: Decodable { let voice: String }
+                let query = try JSONDecoder().decode(Query.self, from: request.body)
+                var selection = SynthesisOptions(); selection.voice = query.voice
+                return response(status: "200 OK", contentType: "application/json", body: encodedJSON(try coordinator.siri.presets(selection)))
+            } catch { return errorResponse(error) }
+        }
+        if request.method == "GET", request.path == "/v1/capabilities" {
+            let report = try SiriCapabilities.inspect(engine: coordinator.siri, options: SynthesisOptions(), probe: false)
+            return response(status: "200 OK", contentType: "application/json", body: encodedJSON(report))
+        }
         if request.method == "GET", request.path == "/v1/models" {
             return try modelsResponse()
         }
@@ -282,7 +370,7 @@ public final class SpeechServer {
                 status: "200 OK",
                 contentType: rendered.contentType,
                 body: body,
-                extraHeaders: ["X-Siri-TTS-Engine": rendered.engine.rawValue]
+                extraHeaders: rendered.headers
             )
         } catch {
             return errorResponse(error)
@@ -299,6 +387,7 @@ public final class SpeechServer {
         }
         let apiRequest: SpeechAPIRequest
         do {
+            if let object = try JSONSerialization.jsonObject(with: request.body) as? [String: Any], let controls = object["controls"] as? [String: Any] { try SpeechJSON.checkControls(controls) }
             apiRequest = try JSONDecoder().decode(SpeechAPIRequest.self, from: request.body)
         } catch {
             throw HTTPFailure(
@@ -306,6 +395,7 @@ public final class SpeechServer {
                 message: "Invalid request JSON: \(error.localizedDescription)"
             )
         }
+        guard apiRequest.input.utf8.count <= options.maximumInputBytes else { throw HTTPFailure(status: "413 Payload Too Large", message: "input exceeds the configured byte limit") }
         guard !apiRequest.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw HTTPFailure(
                 status: "400 Bad Request",
@@ -326,16 +416,24 @@ public final class SpeechServer {
                 message: "speed must be between 0.25 and 4.0"
             )
         }
+        do { try apiRequest.controls?.validate() } catch { throw HTTPFailure(status: "400 Bad Request", message: error.localizedDescription) }
+        if let pitch = apiRequest.pitch, !pitch.isFinite || !(0.5...2).contains(pitch) { throw HTTPFailure(status: "400 Bad Request", message: "pitch must be from 0.5 through 2") }
+        if let volume = apiRequest.volume, !volume.isFinite || !(0...1).contains(volume) { throw HTTPFailure(status: "400 Bad Request", message: "volume must be from 0 through 1") }
         return apiRequest
     }
 
     private func renderSpeechToFile(_ apiRequest: SpeechAPIRequest) throws -> FileSpeechResponse {
         let format = (apiRequest.responseFormat ?? "wav").lowercased()
         var synthesis = SynthesisOptions()
+        synthesis.ssml = apiRequest.ssml ?? false
+        synthesis.timeout = options.requestTimeout
         synthesis.text = apiRequest.input
         synthesis.voice = apiRequest.voice
         synthesis.engine = options.engine
         synthesis.rate = Float(apiRequest.speed ?? 1)
+        synthesis.pitch = apiRequest.pitch ?? 1
+        synthesis.volume = apiRequest.volume ?? 1
+        synthesis.controls = apiRequest.controls ?? SpeechControls()
         synthesis.format = format == "wav" ? .wav : .pcm
 
         let spool = try PCMSpool()
@@ -356,7 +454,8 @@ public final class SpeechServer {
         return FileSpeechResponse(
             url: output,
             contentType: format == "wav" ? "audio/wav" : "application/octet-stream",
-            engine: rendered.engine
+            engine: rendered.engine,
+            diagnostics: rendered.diagnostics
         )
     }
 
@@ -378,7 +477,7 @@ public final class SpeechServer {
                 status: "200 OK",
                 contentType: rendered.contentType,
                 contentLength: size,
-                extraHeaders: ["X-Siri-TTS-Engine": rendered.engine.rawValue]
+                extraHeaders: rendered.headers
             ),
             to: descriptor
         )
@@ -388,11 +487,14 @@ public final class SpeechServer {
     private func modelsResponse() throws -> Data {
         struct Model: Encodable {
             let id: String
+            let assetKey: String
+            let language: String
+            let generation: String
             let object = "model"
             let ownedBy = "local-macos"
 
             enum CodingKeys: String, CodingKey {
-                case id, object
+                case id, object, assetKey, language, generation
                 case ownedBy = "owned_by"
             }
         }
@@ -411,7 +513,7 @@ public final class SpeechServer {
         return response(
             status: "200 OK",
             contentType: "application/json",
-            body: encodedJSON(Models(data: voices.map { Model(id: $0.name) }))
+            body: encodedJSON(Models(data: voices.map { Model(id: $0.name, assetKey: $0.assetKey, language: $0.language, generation: $0.assetKey.contains(":fmvoice:") ? "expressive" : "legacy") }))
         )
     }
 
@@ -451,6 +553,8 @@ public final class SpeechServer {
                       range.upperBound <= Int.max - contentLength else {
                     throw CLIError("Invalid Content-Length", code: .usage)
                 }
+                guard contentLength <= options.maximumBodyBytes else { throw HTTPFailure(status: "413 Payload Too Large", message: "Request body exceeds the configured limit") }
+                guard range.upperBound <= maximumHeaderBytes else { throw CLIError("HTTP request headers are too large", code: .usage) }
                 expectedSize = range.upperBound + contentLength
             }
             if let expectedSize, data.count >= expectedSize { break }
@@ -508,6 +612,8 @@ public final class SpeechServer {
                 status = "400 Bad Request"
             case .noCompatibleEngine, .daemonUnreachable:
                 status = "503 Service Unavailable"
+            case .operationTimedOut:
+                status = "504 Gateway Timeout"
             case .cancelled:
                 status = "499 Client Closed Request"
             default:
@@ -561,7 +667,7 @@ public final class SpeechServer {
             &noPipe,
             socklen_t(MemoryLayout.size(ofValue: noPipe))
         )
-        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+        var timeout = timeval(tv_sec: options.socketTimeout, tv_usec: 0)
         _ = setsockopt(
             descriptor,
             SOL_SOCKET,

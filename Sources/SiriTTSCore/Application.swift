@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import SiriTTSProtocol
 
 public final class SiriTTSApplication: @unchecked Sendable {
     public let coordinator: EngineCoordinator
@@ -16,6 +17,110 @@ public final class SiriTTSApplication: @unchecked Sendable {
             print(mainHelp)
         case .version:
             print(siriTTSVersion)
+        case .speak(var options, let interactive):
+            try collectText(into: &options)
+            let engine = coordinator.siri
+            let started: @Sendable () -> Void = {
+                writeStderr("Native playback started.\n")
+                guard interactive else { return }
+                DispatchQueue(label: "SiriTTSCore.playback-input").async {
+                    do {
+                        var reader = JSONLineReader(handle: .standardInput, maximumLineBytes: 4096)
+                        while let data = try reader.next() {
+                            struct Control: Decodable { let action: String; let value: Float?; let rampTime: Double? }
+                            let control = try JSONDecoder().decode(Control.self, from: data)
+                            switch control.action {
+                            case "pause": try engine.pausePlayback()
+                            case "resume": try engine.resumePlayback()
+                            case "rate": guard let value = control.value else { throw CLIError("rate needs value", code: .usage) }; try engine.adjustPlayback(rate: value)
+                            case "volume": guard let value = control.value else { throw CLIError("volume needs value", code: .usage) }; try engine.adjustPlayback(volume: value, rampTime: control.rampTime ?? 0)
+                            case "cancel": engine.cancel(); return
+                            default: throw CLIError("Unknown playback action", code: .usage)
+                            }
+                            writeStderr("Playback control accepted: \(control.action)\n")
+                        }
+                    } catch { writeStderr("Playback control error: \(error.localizedDescription)\n"); engine.cancel() }
+                }
+            }
+            let result = try engine.speak(options, onStarted: started)
+            if options.json { printJSON(result) }
+            else { print("Playback completed · \(result.resolvedVoice ?? result.requestedVoice)") }
+        case .presets(let options):
+            printJSON(try coordinator.siri.presets(options))
+        case .preview(let options):
+            let url = try coordinator.siri.previewURL(options)
+            if options.json { printJSON(["url": url.absoluteString, "kind": "bundled-preview", "readiness": "not-a-synthesis-probe"]) }
+            else { print(url.path) }
+        case .prewarm(let options):
+            let voice = try coordinator.siri.prewarm(voice: options.voice, language: options.language, timeout: options.timeout, controls: options.controls)
+            if options.json { printJSON(voice) } else { print("Prewarmed \(voice.assetKey); readiness still requires a synthesis probe.") }
+        case .subscriptions(let clientID, let json):
+            let values = try coordinator.siri.subscriptions(clientID: clientID)
+            if json { printJSON(values) }
+            else { for value in values { print("\(value.clientID) · \(value.assetKey)") } }
+        case .batch(let options, let stopOnError):
+            var reader = JSONLineReader(handle: .standardInput)
+            var failures = 0
+            var index = 0
+            while let line = try reader.next() {
+                index += 1
+                var id = String(index)
+                do {
+                    struct Job: Decodable { let id: String?; let text: String; let output: String; let config: SpeechConfiguration? }
+                    guard let object = try JSONSerialization.jsonObject(with: line) as? [String: Any] else { throw CLIError("Expected a batch JSON object", code: .usage) }
+                    if let suppliedID = object["id"] as? String { id = suppliedID }
+                    try SpeechJSON.check(object, allowed: ["id", "text", "output", "config"])
+                    if let config = object["config"] { _ = try SpeechJSON.decodeConfiguration(JSONSerialization.data(withJSONObject: config)) }
+                    let job = try JSONDecoder().decode(Job.self, from: line)
+                    var request = options
+                    if let config = job.config { try request.apply(config) }
+                    guard job.output != "-" && !job.output.isEmpty else { throw CLIError("Batch jobs require an output file", code: .usage) }
+                    guard !job.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CLIError("Batch text is empty", code: .usage) }
+                    request.text = job.text; request.output = job.output; request.json = true; request.requestTimings = true
+                    let result = try runSynthesis(request, emitResult: false)
+                    struct Success: Encodable { let id: String; let result: SynthesisResult }
+                    printJSONLine(Success(id: id, result: result))
+                } catch {
+                    failures += 1
+                    struct Failure: Encodable { let id: String; let error: String; let exitCode: Int32 }
+                    printJSONLine(Failure(id: id, error: error.localizedDescription, exitCode: (error as? CLIError)?.code.rawValue ?? 70))
+                    if stopOnError { break }
+                }
+            }
+            if failures > 0 { throw CLIError("\(failures) batch job(s) failed; see JSONL results", code: .internalFailure) }
+        case .stream(let options):
+            let input = SpeechTextStream()
+            DispatchQueue(label: "SiriTTSCore.stdin").async {
+                do {
+                    var reader = JSONLineReader(handle: .standardInput, maximumLineBytes: 128_000)
+                    while let line = try reader.next() {
+                        struct Record: Decodable { let text: String?; let utterance: String?; let end: Bool? }
+                        let record = try JSONDecoder().decode(Record.self, from: line)
+                        guard [record.text != nil, record.utterance != nil, record.end == true].filter({ $0 }).count == 1 else { throw CLIError("Each stream record needs exactly one of text, utterance, or end:true", code: .usage) }
+                        if let text = record.text { try input.append(text) }
+                        else if let utterance = record.utterance { try input.appendUtterance(utterance) }
+                        else { break }
+                    }
+                    input.finish()
+                } catch { input.fail(error) }
+            }
+            try runSynthesis(options, textInput: input)
+        case .analyze(var options, let alphabet):
+            try collectText(into: &options)
+            let result = try coordinator.siri.analyze(options, phonemeSystem: alphabet)
+            if options.json { printJSON(result) }
+            else if let phonemes = result.phonemes { print(phonemes) }
+            else if let seconds = result.estimatedSeconds { print(String(format: "%.3f", seconds)) }
+            for warning in result.warnings { writeStderr("warning: \(warning)\n") }
+        case .capabilities(let options, let probe):
+            let report = try SiriCapabilities.inspect(engine: coordinator.siri, options: options, probe: probe)
+            if options.json { printJSON(report) }
+            else {
+                print("Siri voice capabilities · \(report.systemVersion)")
+                for voice in report.voices { print("\(voice.name) · \(voice.language) · \(voice.generation) · presets \(voice.presetCount) · \(voice.readiness)\(voice.detail.map { ": " + $0 } ?? "")") }
+                print("Expressive mode uses private client identity \(report.expressiveClientID).")
+                print("Presence is not synthesis readiness; use --voice ID --probe to verify.")
+            }
         case .voices(let options):
             try runVoices(options)
         case .synthesize(var options):
@@ -171,7 +276,8 @@ public final class SiriTTSApplication: @unchecked Sendable {
         }
     }
 
-    private func runSynthesis(_ options: SynthesisOptions) throws {
+    @discardableResult
+    private func runSynthesis(_ options: SynthesisOptions, textInput: SpeechTextStream? = nil, emitResult: Bool = true) throws -> SynthesisResult {
         if options.progress {
             writeStderr("Synthesizing with \(options.engine.rawValue)…\n")
         }
@@ -180,12 +286,19 @@ public final class SiriTTSApplication: @unchecked Sendable {
             URL(fileURLWithPath: $0).standardizedFileURL.deletingLastPathComponent()
         } ?? FileManager.default.temporaryDirectory
         let spool = streaming ? nil : try PCMSpool(directory: spoolDirectory)
-        let rendered = try LongFormSynthesis.render(
-            options,
-            coordinator: coordinator,
-            onProvisionalPCMChunk: streaming ? writeStdoutChunk : nil,
-            sink: { try spool?.append($0) }
-        )
+        let rendered: IncrementalSynthesisResult
+        if let textInput {
+            let audio = try coordinator.siri.synthesize(options, onPCMChunk: streaming ? writeStdoutChunk : nil, textInput: textInput)
+            if !streaming { try spool?.append(audio.pcm) }
+            let samples = audio.pcm.count / audio.spec.bytesPerFrame
+            rendered = IncrementalSynthesisResult(spec: audio.spec, voice: audio.voice, timings: [], timingsSupported: false,
+                engine: audio.engine, fallbackFrom: nil, elapsed: audio.elapsed, timeToFirstAudio: audio.timeToFirstAudio,
+                bytes: audio.pcm.count, nonSilent: audio.nonSilent, sampleCount: samples, durationSeconds: Double(samples) / audio.spec.sampleRate,
+                diagnostics: audio.diagnostics.map { [$0] } ?? [])
+        } else {
+            rendered = try LongFormSynthesis.render(options, coordinator: coordinator,
+                onProvisionalPCMChunk: streaming ? writeStdoutChunk : nil, sink: { try spool?.append($0) })
+        }
         if let fallback = rendered.fallbackFrom {
             writeStderr(
                 "warning: \(fallback.rawValue) engine failed; visibly falling back to \(rendered.engine.rawValue)\n"
@@ -238,7 +351,7 @@ public final class SiriTTSApplication: @unchecked Sendable {
             bytes: rendered.bytes,
             sampleCount: rendered.sampleCount,
             durationSeconds: rendered.durationSeconds,
-            nonSilent: true
+            nonSilent: rendered.nonSilent
         )
         let result = SynthesisResult(
             engine: rendered.engine.rawValue,
@@ -248,10 +361,14 @@ public final class SiriTTSApplication: @unchecked Sendable {
             timings: mappedTimings,
             timingsSupported: rendered.timingsSupported,
             elapsedSeconds: rendered.elapsed,
-            timeToFirstAudioSeconds: rendered.timeToFirstAudio
+            timeToFirstAudioSeconds: rendered.timeToFirstAudio,
+            diagnostics: rendered.diagnostics.isEmpty ? nil : rendered.diagnostics
         )
 
-        if options.json {
+        for diagnostic in rendered.diagnostics {
+            for warning in diagnostic.warnings { writeStderr("warning: \(warning)\n") }
+        }
+        if emitResult && options.json {
             let data = encodedJSON(result)
             if streaming {
                 FileHandle.standardError.write(data)
@@ -260,7 +377,7 @@ public final class SiriTTSApplication: @unchecked Sendable {
                 FileHandle.standardOutput.write(data)
                 FileHandle.standardOutput.write(Data("\n".utf8))
             }
-        } else if !streaming {
+        } else if emitResult && !streaming {
             print(
                 "✓ \(rendered.voice.name) · \(String(format: "%.2f", rendered.durationSeconds))s · " +
                 "\(Int(rendered.spec.sampleRate)) Hz · \(outputDescription)"
@@ -269,6 +386,7 @@ public final class SiriTTSApplication: @unchecked Sendable {
         if options.progress {
             writeStderr("Complete in \(String(format: "%.2f", rendered.elapsed))s.\n")
         }
+        return result
     }
 
     private func runDoctor(_ options: DoctorOptions) {
@@ -384,4 +502,9 @@ private func writeStdoutChunk(_ data: Data) {
     } catch {
         // A downstream pipe closing is a normal streaming termination condition.
     }
+}
+
+private func printJSONLine<T: Encodable>(_ value: T) {
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    if let data = try? encoder.encode(value) { FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data("\n".utf8)) }
 }

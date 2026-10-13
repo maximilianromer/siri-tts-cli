@@ -1,7 +1,7 @@
 class SiriTtsCli < Formula
   desc "Render installed neural Siri voices from the macOS command-line"
   homepage "https://github.com/maximilianromer/siri-tts-cli"
-  url "https://github.com/maximilianromer/siri-tts-cli.git", tag: "v1.0.0"
+  url "https://github.com/maximilianromer/siri-tts-cli.git", tag: "v2.0.0"
   license "MIT"
   head "https://github.com/maximilianromer/siri-tts-cli.git", branch: "main"
 

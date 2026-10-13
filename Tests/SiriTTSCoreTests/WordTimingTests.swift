@@ -3,6 +3,22 @@ import XCTest
 @testable import SiriTTSCore
 
 final class WordTimingTests: XCTestCase {
+    func testRestoresSourceRangesAfterWhitespaceNormalization() throws {
+        let source = "  Title\r\n\r\nWhen   👋🏽\t cafe\u{301} arrived.  "
+        let mapping = SpeechTextMapping(source)
+        XCTAssertEqual(mapping.text, "Title\nWhen 👋🏽 cafe\u{301} arrived.")
+        for word in ["Title", "When", "👋🏽", "cafe\u{301}", "arrived."] {
+            let native = RawWordTiming(start: 0.5, range: (mapping.text as NSString).range(of: word))
+            let restored = try XCTUnwrap(mapping.restore(native))
+            XCTAssertEqual(restored.range, (source as NSString).range(of: word))
+            XCTAssertEqual(restored.start, 0.5)
+        }
+        XCTAssertNil(mapping.restore(RawWordTiming(start: 0, range: NSRange(location: Int.max, length: 2))))
+        XCTAssertNil(mapping.restore(RawWordTiming(start: 0, range: NSRange(location: -1, length: 1))))
+        XCTAssertNil(mapping.restore(RawWordTiming(start: 0, range: NSRange(location: 0, length: 999))))
+        XCTAssertNil(mapping.restore(RawWordTiming(start: 0, range: NSRange(location: 0, length: 0))))
+    }
+
     func testMapsUTF16RangesAndDerivesEnds() throws {
         let text = "Hi 👋🏽 世界"
         let ns = text as NSString

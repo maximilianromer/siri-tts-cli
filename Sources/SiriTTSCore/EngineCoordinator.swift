@@ -13,6 +13,9 @@ public final class EngineCoordinator: @unchecked Sendable {
         _ options: SynthesisOptions,
         onPCMChunk: (@Sendable (Data) -> Void)? = nil
     ) throws -> (audio: RenderedAudio, fallbackFrom: EngineKind?) {
+        if options.engine == .av, options.controls.hasPrivateControls {
+            throw CLIError("Siri-specific controls cannot be applied by the AV engine", code: .usage)
+        }
         switch options.engine {
         case .siri:
             return (try siri.synthesize(options, onPCMChunk: onPCMChunk), nil)
@@ -22,6 +25,7 @@ public final class EngineCoordinator: @unchecked Sendable {
             do {
                 return (try siri.synthesize(options, onPCMChunk: onPCMChunk), nil)
             } catch let siriError as CLIError {
+                if options.controls.hasPrivateControls { throw siriError }
                 guard [.daemonUnreachable, .noCompatibleEngine, .noAudio].contains(siriError.code)
                 else { throw siriError }
                 do {

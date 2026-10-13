@@ -14,15 +14,24 @@ fi
 
 "$SIRI_TTS_BIN" --version
 "$SIRI_TTS_BIN" voices --json > "$SMOKE_DIR/voices.json"
-VOICE="$(plutil -extract voices.0.name raw -o - "$SMOKE_DIR/voices.json")"
+VOICE=""
+voice_index=0
+while candidate="$(plutil -extract "voices.$voice_index.assetKey" raw -o - "$SMOKE_DIR/voices.json" 2>/dev/null)"; do
+  if [[ "$candidate" == en-US:natural:* || "$candidate" == en-GB:natural:* ]]; then
+    VOICE="$candidate"
+    break
+  fi
+  (( voice_index += 1 ))
+done
 if [[ -z "$VOICE" ]]; then
-  print -u2 "smoke: no installed Siri voices"
+  print -u2 "smoke: install a legacy English Siri voice for the English timing check"
   exit 1
 fi
 
-TEXT="Siri Voice smoke test ${RANDOM} ${RANDOM}."
+TEXT="The quiet river flows beside the old stone bridge."
 "$SIRI_TTS_BIN" synthesize \
   --voice "$VOICE" \
+  --generation legacy \
   --timings "$SMOKE_DIR/timings.json" \
   --json \
   -o "$SMOKE_DIR/output.wav" \
@@ -35,6 +44,11 @@ grep -q "source bit depth: I16" "$SMOKE_DIR/afinfo.txt"
 DURATION="$(plutil -extract audio.durationSeconds raw -o - "$SMOKE_DIR/result.json")"
 NON_SILENT="$(plutil -extract audio.nonSilent raw -o - "$SMOKE_DIR/result.json")"
 TIMING_COUNT="$(plutil -extract timings json -o - "$SMOKE_DIR/timings.json" | awk '{ count += gsub(/utf16Location/, "&") } END { print count + 0 }')"
+TIMINGS_SUPPORTED="$(plutil -extract timingsSupported raw -o - "$SMOKE_DIR/result.json")"
+if [[ "$TIMINGS_SUPPORTED" != "true" ]] || (( TIMING_COUNT == 0 )); then
+  print -u2 "smoke: legacy word timings are missing or unsupported"
+  exit 1
+fi
 if (( $(awk "BEGIN { print ($DURATION <= 0.05) }") )) || [[ "$NON_SILENT" != "true" ]]; then
   print -u2 "smoke: audio acceptance failed"
   exit 1

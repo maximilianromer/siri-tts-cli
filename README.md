@@ -28,7 +28,31 @@ $ siri-tts -v Aaron -o hello.wav "The good voice, from the terminal."
 - Xcode 26 or newer
 - At least one Siri voice installed by macOS
 
-Currently verified on macOS 26.6.2 (25G83); older releases are expected to work but have not been runtime-verified.
+Version 2 is currently verified on macOS 27.0.1 (26A434); older releases have not been re-tested with this version.
+
+## macOS 27 update
+
+Version 2 adds the new expressive Siri voices on macOS 27, with controls for speaking pace and expressivity. The older voices are still available, including their word timings.
+
+```sh
+# Render with the new Aaron voice. Pace and expressivity each range from 1 to 5.
+siri-tts --generation expressive --voice aaron --pace 3 --expressivity 3 \
+  -o speech.wav "The good voice, with a little more expression."
+
+# Use the older Aaron voice with word timings.
+siri-tts --generation legacy --voice Aaron --timings timings.json \
+  -o speech.wav "Highlight these words as they are spoken."
+
+# Check a voice and see its available presets.
+siri-tts capabilities --voice aaron --generation expressive --probe
+siri-tts presets --voice aaron
+```
+
+`Aaron` selects the older voice and `aaron` selects the expressive one; `--generation` makes the choice explicit. Expressive voices do not return word timings. Long text is split into smaller chunks automatically.
+
+If a British expressive voice is missing its language resources, run `siri-tts voices --install Arthur --wait` to download them. Installation and purging apply to the older voice bundles; the expressive voices share their model resources.
+
+Version 2 also adds reusable [JSON configurations](examples/configs/expressive-narration.json), JSONL batch jobs, incremental text input through `stream`, and additional speech controls. Use `siri-tts COMMAND --help` for each command's options. The HTTP API and Swift SDK accept pace, expressivity, and generation through `controls` too; for example, `"controls": {"generation": "expressive", "pace": 3, "expressivity": 3}` in an HTTP speech request.
 
 ## Command-line users
 
@@ -90,7 +114,7 @@ siri-tts synthesize \
   "Highlight these words as they are spoken."
 ```
 
-The daemon supplies each word's start time and an `NSRange` into the source text. The JSON therefore identifies offsets as UTF-16, which keeps emoji, CJK, and other non-BMP text correct. End times are explicitly marked `endDerived: true`: they are derived from the next word's start, and the final word ends at the measured audio duration. If a voice does not support native timings, the tool returns an empty list and `timingsSupported: false`.
+For legacy voices, the daemon supplies word start times and an `NSRange` into the source text. The JSON identifies offsets as UTF-16. Native timings can occasionally group words or leave gaps. End times are explicitly marked `endDerived: true`: they are derived from the next word's start, and the final word ends at the measured audio duration. If a voice does not support native timings, the tool returns an empty list and `timingsSupported: false`. Timings are available through regular CLI synthesis; the `stream` command, HTTP API, and Swift SDK return audio without timing metadata.
 
 ### Discover and install voices
 
@@ -149,9 +173,9 @@ siri-tts doctor --json
 
 The report includes the macOS product version and build, architecture, framework and daemon status, engine availability, installed voice assets, ANE compilation state, observed audio format, and a short real non-silent synthesis probe. `doctor --json` is the right attachment for a compatibility report.
 
-## Complete CLI reference
+## CLI reference
 
-This section documents every command, option, alias, accepted value, default, and combination rule currently implemented by the CLI. Option names are case-sensitive; values such as engine and format names are case-insensitive where noted.
+This section covers the original CLI commands and options. For the additions in version 2, see [macOS 27 update](#macos-27-update) and `siri-tts COMMAND --help`. Option names are case-sensitive; values such as engine and format names are case-insensitive where noted.
 
 ### Global invocations
 
@@ -180,14 +204,14 @@ Positional text, `-f`/`--input-file`, and standard input are the three input mod
 
 | Option                         | Accepted value and default                                       | Behavior                                                                                                                                                                                                                                                                            |
 | ------------------------------ | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-v NAME`, `--voice NAME`      | Display name or asset identifier; default: engine-selected voice | Select the voice case-insensitively. A catalog identifier is mapped to its installed version when possible. Without an explicit voice, Siri uses its first matching installed voice; AV uses the platform default for the requested language, or `en-US` when no language is given. |
+| `-v NAME`, `--voice NAME`      | Display name or asset identifier; default: engine-selected voice | Exact names take precedence; case-insensitive matches must be unambiguous. A catalog identifier is mapped to its installed version when possible. Without an explicit voice, Siri prefers a legacy voice in the current locale unless expressive controls are requested; AV uses the platform default for the requested language, or `en-US` when no language is given. |
 | `-l TAG`, `--language TAG`     | Language tag such as `en-US`; default: no restriction            | Restrict voice selection to an exact, case-insensitive language match.                                                                                                                                                                                                              |
 | `-o PATH`, `--output PATH`     | File path, `-`, or omitted                                       | Write a file, stream raw PCM to standard output with `-`, or play through the default audio output when omitted.                                                                                                                                                                    |
 | `-f PATH`, `--input-file PATH` | UTF-8 text-file path                                             | Read the complete synthesis input from a file. Cannot be combined with positional text.                                                                                                                                                                                             |
 | `-r WPM`                       | Greater than 0 through 700; default: 175                         | `say`-compatible words per minute. The CLI maps 175 WPM to native rate `1.0`.                                                                                                                                                                                                       |
 | `--rate MULTIPLIER`            | Greater than 0 through 4; default: `1.0`                         | Set the native speaking-rate multiplier directly. If both rate forms are supplied, the last one wins.                                                                                                                                                                               |
 | `--pitch MULTIPLIER`           | `0.5` through `2.0`; default: `1.0`                              | Set native pitch.                                                                                                                                                                                                                                                                   |
-| `--volume NUMBER`              | `0` through `1`; default: `1.0`                                  | Set native volume.                                                                                                                                                                                                                                                                  |
+| `--volume NUMBER`              | `0` through `1`; default: `1.0`                                  | Set output volume.                                                                                                                                                                                                                                                                  |
 | `--engine KIND`                | `siri`, `av`, or `auto`; default: `siri`                         | Use the private Siri engine, the public AV engine, or visible Siri-to-AV fallback. Values are case-insensitive.                                                                                                                                                                     |
 | `--format FORMAT`              | `wav`, `pcm`, or `caf`; default: `wav`                           | Select the output container. Values are case-insensitive. Raw PCM is signed little-endian 16-bit, 48 kHz, mono.                                                                                                                                                                     |
 | `--file-format FORMAT`         | `WAVE`/`WAV` or `CAFF`/`CAF`                                     | `say`-compatible alias for selecting WAV or CAF. Use `--format pcm` for raw PCM. Values are case-insensitive.                                                                                                                                                                       |
@@ -198,7 +222,7 @@ Positional text, `-f`/`--input-file`, and standard input are the three input mod
 | `--progress`                   | No value                                                         | Write start and completion messages to standard error.                                                                                                                                                                                                                              |
 | `--prewarm`                    | No value; default                                                | Explicitly enable Siri model prewarming before synthesis.                                                                                                                                                                                                                           |
 | `--no-prewarm`                 | No value                                                         | Skip Siri model prewarming.                                                                                                                                                                                                                                                         |
-| `--timeout SECONDS`            | `1` through `3600`; default: `120`                               | Set the engine timeout for each bounded synthesis render.                                                                                                                                                                                                                           |
+| `--timeout SECONDS`            | `1` through `3600`; default: `120`                               | Set the overall synthesis timeout.                                                                                                                                                                                                                           |
 | `-h`, `--help`                 | No value                                                         | Print synthesis help and exit successfully.                                                                                                                                                                                                                                         |
 | `--`                           | No value                                                         | Treat all remaining arguments as positional text, including values beginning with `-`.                                                                                                                                                                                              |
 
@@ -256,13 +280,13 @@ siri-tts serve [--host ADDRESS] [--port NUMBER] [--engine KIND] [--verbose]
 
 | Option           | Accepted value and default                                 | Behavior                                                                                                                                          |
 | ---------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--host ADDRESS` | IPv4 or IPv6 literal, or `localhost`; default: `127.0.0.1` | Select the bind address. Non-loopback addresses expose an unauthenticated endpoint and print a warning. IPv6 addresses are displayed in brackets. |
+| `--host ADDRESS` | IPv4 or IPv6 literal, or `localhost`; default: `127.0.0.1` | Select the bind address. Non-loopback addresses expose the endpoint and print a warning. IPv6 addresses are displayed in brackets. |
 | `--port NUMBER`  | `1` through `65535`; default: `8080`                       | Select the listening port.                                                                                                                        |
 | `--engine KIND`  | `siri`, `av`, or `auto`; default: `siri`                   | Select the engine used for both model listing and synthesis. Values are case-insensitive.                                                         |
 | `--verbose`      | Off                                                        | Log request failures to standard error in addition to returning their JSON HTTP error response.                                                   |
 | `-h`, `--help`   | —                                                          | Print server help and exit successfully.                                                                                                          |
 
-The server handles one synthesis request at a time and always prints its listening URL to standard error. It has no authentication or TLS and should normally remain bound to loopback.
+The server handles one synthesis request at a time and always prints its listening URL to standard error. It supports bearer authentication through `--auth-token-env NAME`, has no TLS, and should normally remain bound to loopback.
 
 `GET /v1/models` returns an OpenAI-style model list. Each installed voice is represented as a model with `id`, `object: "model"`, and `owned_by: "local-macos"`. The selected server engine controls whether the list comes from Siri, AV, or Siri-with-AV-fallback.
 
@@ -311,7 +335,7 @@ In Xcode, add this repository as a package dependency and select the `SiriTTSCli
 dependencies: [
     .package(
         url: "https://github.com/maximilianromer/siri-tts-cli.git",
-        from: "1.0.0"
+        from: "2.0.0"
     ),
 ]
 ```
@@ -371,13 +395,13 @@ let audioFile = try await client.synthesize(.init(
 ), to: output)
 ```
 
-The helper breaks long input into manageable pieces and writes each piece to disk as it finishes. Input length is therefore limited by available time and disk space, rather than by a fixed text-size cutoff. WAV itself has a roughly 4 GB file-size ceiling; use raw PCM for output beyond that format limit.
+The helper breaks long input into manageable pieces and writes each piece to disk as it finishes. The HTTP helper defaults to a 1 MiB text limit and a 2 MiB request-body limit; raise these with `--max-input-bytes` and `--max-body-bytes` for larger inputs. WAV itself has a roughly 4 GB file-size ceiling; use raw PCM for output beyond that format limit.
 
 The response reports whether the helper used the `siri` or public `av` engine. Server errors, including a missing voice or unavailable engine, arrive as typed Swift errors.
 
 ## Exit codes
 
-The interface version is `1.0.0`. It covers the documented CLI behavior and HTTP routes used by the Swift SDK. Most versioned CLI JSON payloads carry `schemaVersion: 1`; the installation-status payload exception is documented in [JSON and timing payloads](#json-and-timing-payloads). Stable CLI exit codes:
+The version 2 interfaces cover the documented CLI behavior and HTTP routes used by the Swift SDK. Most versioned CLI JSON payloads carry `schemaVersion: 1`; the installation-status payload exception is documented in [JSON and timing payloads](#json-and-timing-payloads). Stable CLI exit codes:
 
 | Code | Meaning                                                          |
 | ---- | ---------------------------------------------------------------- |
@@ -400,7 +424,7 @@ make live-test  # Siri, AV, Unicode timing, and HTTP integration tests
 make benchmark  # time-to-first-audio and total-time CSV
 ```
 
-The unit suite covers CLI validation and `say` translation, WAV headers, silence and frame validation, HTTP parsing and OpenAI request shapes, and UTF-16 timing ranges. Live tests use unique text and validate actual speech rather than treating a build or file write as proof. No test fuzzes Apple's daemon.
+The unit suite covers CLI validation and `say` translation, WAV headers, silence and frame validation, HTTP parsing and OpenAI request shapes, and UTF-16 timing ranges. Live tests check audio, voice selection, and legacy word timings rather than treating a build or file write as proof. No test fuzzes Apple's daemon.
 
 ## Acknowledgements
 

@@ -187,6 +187,19 @@ final class SiriAudioNormalizerTests: XCTestCase {
         XCTAssertLessThan(accepted.durationSeconds, 0.55)
     }
 
+    func testNativeTextStreamCanTransitionBetweenPCMAndCachedOpus() throws {
+        let encoded = try makeOpusFixture(frames: 24000)
+        let normalizer = SiriAudioNormalizer(allowFormatChanges: true)
+        let pcm = pcmFixture(frames:4800)
+        let chunks = try normalizer.append(source(pcm,samples:4800)) + normalizer.append(encoded) + normalizer.append(source(pcm,samples:4800)) + normalizer.finish()
+        var nextFrame = 0
+        for chunk in chunks { XCTAssertEqual(chunk.startFrame,nextFrame); nextFrame += chunk.frameCount }
+        XCTAssertGreaterThan(nextFrame,28000)
+        let strict = SiriAudioNormalizer()
+        _ = try strict.append(source(pcm,samples:4800))
+        XCTAssertThrowsError(try strict.append(encoded))
+    }
+
     func testOpusPacketOffsetOutsidePayloadFails() throws {
         var encoded = try makeOpusFixture(frames: 4_800)
         var descriptions = encoded.packetDescriptions

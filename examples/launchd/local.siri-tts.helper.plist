@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>local.siri-tts.helper</string>
+  <key>ProgramArguments</key><array>
+    <string>/ABSOLUTE/PATH/TO/siri-tts</string>
+    <string>serve</string>
+    <string>--host</string><string>127.0.0.1</string>
+    <string>--port</string><string>8080</string>
+    <string>--request-timeout</string><string>120</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/ABSOLUTE/PATH/TO/siri-tts.stdout.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/PATH/TO/siri-tts.stderr.log</string>
+</dict></plist>

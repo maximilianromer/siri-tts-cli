@@ -1,7 +1,8 @@
 import CoreAudioTypes
 import Foundation
+public import SiriTTSProtocol
 
-public let siriTTSVersion = "1.0.0"
+public let siriTTSVersion = "2.0.0"
 public let siriTTSSchemaVersion = 1
 
 public enum ExitCode: Int32, Sendable {
@@ -248,6 +249,7 @@ public struct SynthesisOptions: Sendable {
     public var output: String?
     public var format: AudioFormat = .wav
     public var engine: EngineKind = .siri
+    public var controls = SpeechControls()
     public var rate: Float = 1
     public var pitch: Float = 1
     public var volume: Float = 1
@@ -256,6 +258,8 @@ public struct SynthesisOptions: Sendable {
     public var timingsPath: String?
     public var requestTimings = false
     public var prewarm = true
+    public var ssml = false
+    public var chunkBytes = 4_000
     public var timeout: TimeInterval = 120
 
     public init() {}
@@ -287,6 +291,12 @@ public struct ServeOptions: Sendable {
     public var port: UInt16 = 8080
     public var engine: EngineKind = .siri
     public var verbose = false
+    public var allowVoiceManagement = false
+    public var authToken: String?
+    public var maximumInputBytes = 1_048_576
+    public var maximumBodyBytes = 2_097_152
+    public var requestTimeout: TimeInterval = 120
+    public var socketTimeout: Int = 10
 
     public init() {}
 }
@@ -298,6 +308,15 @@ public enum ParsedCommand: Sendable {
     case synthesize(SynthesisOptions)
     case doctor(DoctorOptions)
     case serve(ServeOptions)
+    case capabilities(SynthesisOptions, probe: Bool)
+    case analyze(SynthesisOptions, PhonemeAlphabet?)
+    case presets(SynthesisOptions)
+    case preview(SynthesisOptions)
+    case prewarm(SynthesisOptions)
+    case subscriptions(clientID: String?, json: Bool)
+    case speak(SynthesisOptions, interactive: Bool)
+    case stream(SynthesisOptions)
+    case batch(SynthesisOptions, stopOnError: Bool)
 }
 
 public struct SynthesisResult: Codable, Sendable {
@@ -310,6 +329,7 @@ public struct SynthesisResult: Codable, Sendable {
     public let timingsSupported: Bool
     public let elapsedSeconds: Double
     public let timeToFirstAudioSeconds: Double?
+    public let diagnostics: [SynthesisDiagnostics]?
 
     public init(
         engine: String,
@@ -319,7 +339,8 @@ public struct SynthesisResult: Codable, Sendable {
         timings: [WordTiming],
         timingsSupported: Bool,
         elapsedSeconds: Double,
-        timeToFirstAudioSeconds: Double?
+        timeToFirstAudioSeconds: Double?,
+        diagnostics: [SynthesisDiagnostics]? = nil
     ) {
         self.schemaVersion = siriTTSSchemaVersion
         self.engine = engine
@@ -330,6 +351,7 @@ public struct SynthesisResult: Codable, Sendable {
         self.timingsSupported = timingsSupported
         self.elapsedSeconds = elapsedSeconds
         self.timeToFirstAudioSeconds = timeToFirstAudioSeconds
+        self.diagnostics = diagnostics
     }
 }
 
@@ -354,4 +376,27 @@ public struct RenderedAudio: Sendable {
     public let engine: EngineKind
     public let elapsed: Double
     public let timeToFirstAudio: Double?
+    public var diagnostics: SynthesisDiagnostics? = nil
+    public var nonSilent: Bool = true
+}
+
+extension SynthesisOptions {
+    public func validate() throws {
+        var config = SpeechConfiguration()
+        config.rate = rate; config.pitch = pitch; config.volume = volume
+        config.engine = engine.rawValue; config.format = format.rawValue
+        config.controls = controls; config.chunkBytes = chunkBytes
+        // Native chunks can receive the remaining fraction of an overall deadline.
+        guard timeout.isFinite && timeout > 0 && timeout <= 3600 else { throw CLIError("Timeout must be positive and at most 3600 seconds", code: .usage) }
+        do { try config.validate() } catch { throw CLIError(error.localizedDescription, code: .usage) }
+    }
+
+    public mutating func apply(_ config: SpeechConfiguration) throws {
+        do { try config.validate() } catch { throw CLIError(error.localizedDescription, code: .usage) }
+        if let value = config.voice { voice = value }; if let value = config.language { language = value }
+        if let value = config.engine { engine = EngineKind(rawValue: value)! }; if let value = config.format { format = AudioFormat(rawValue: value)! }
+        if let value = config.rate { rate = value }; if let value = config.pitch { pitch = value }; if let value = config.volume { volume = value }
+        if let value = config.ssml { ssml = value }; if let value = config.prewarm { prewarm = value }; if let value = config.timeout { timeout = value }
+        if let value = config.controls { controls = value }; if let value = config.chunkBytes { chunkBytes = value }
+    }
 }

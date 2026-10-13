@@ -24,7 +24,7 @@ client-test:
 	swift build --package-path Tests/Fixtures/SiriTTSClientConsumer
 
 live-test: build
-	SIRI_TTS_LIVE_TESTS=1 swift test --filter LiveSystemTests
+	SIRI_TTS_LIVE_TESTS=1 swift test --filter 'Live(System|Redesign)Tests'
 	SIRI_TTS_BIN="$(BUILD_DIR)/siri-tts" ./scripts/client-live-smoke.sh
 
 smoke: build
